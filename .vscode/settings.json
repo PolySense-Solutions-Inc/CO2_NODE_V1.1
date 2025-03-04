@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "rtc_scheduler.h": "c",
+        "esp_sleep.h": "c"
+    }
+}
