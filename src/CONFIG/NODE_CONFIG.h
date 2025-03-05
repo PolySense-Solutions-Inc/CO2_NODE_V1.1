@@ -66,7 +66,7 @@
   Power / Performance & Activity Interval Settings
 */
 #define CPU_RUN_FREQUENCY_MHZ 10    // Cpu clock to run at while sampling and sending data.
-#define SLEEP_TIME_NORMAL   5       //Length of time in MINUTES for a LONG sleep period.  (Normal Operation)
+#define SLEEP_TIME_NORMAL   5      //Length of time in MINUTES for a LONG sleep period.  (Normal Operation)
 
 #define NAP_TIME      1             //Length of time in MINUTES for a SHORT sleep period
 

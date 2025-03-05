@@ -5,6 +5,12 @@
  * @par       
  * COPYRIGHT NOTICE: (c) 2024, Developed for Polysense Solutions Inc., by David Stewart.  All rights reserved.
  */ 
+#include <Preferences.h>
+
+// Function declarations
+void saveVariablesToNVS();
+void loadVariablesFromNVS();
+void reconnectUSB();
 
 #ifndef __MAIN_HPP
 #define __MAIN_HPP
@@ -207,11 +213,15 @@ MKL62BA_DRIVER LoRa_Radio(LoRaSerial, LORA_TX, LORA_RX, LORA_BAUD);
 K33Sensor CO2_Sensor(K33_I2C_ADR, &K33_BUS);
 
 //Storage of average sensor values.  Not much point in moving average on something with an ultra-low duty cycle
-volatile float averageCO2;
-volatile float averageTemperature;
-volatile float averageHumidity;
+static volatile float averageCO2 = 0;
+static volatile float averageTemperature = 0;
+static volatile float averageHumidity = 0;
 
 volatile bool K33IsDone = false;
+
+bool USB_WasConnected = false;
+void sleepDeep10WithUSBRestore();
+RTC_DATA_ATTR bool resumingFromDeepSleep = false;
 
 
 #endif

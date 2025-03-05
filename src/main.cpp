@@ -8,6 +8,8 @@
 
 #include "main.hpp"
 
+
+
 /*
 EOD Notes: Dec 12
 
@@ -216,25 +218,25 @@ void SampleK33_CB(){
     static uint32_t currentStep = 0;
     int sampleCount = 0;
 
-    //startCO2Sensor();
+    // Variables for sensor reading accumulation or additional processing can be added here.
     uint32_t CO2_Raw_Accumulator = 0;
     K33SensorError_t readError;
     uint32_t co2SampleAttempts = 0;
     
     uint16_t CO2_Raw_Val = 0;
-    readError = K33_TIMEOUT_ERROR; //Dummy error type to start the while loop
+    readError = K33_TIMEOUT_ERROR; // Dummy error type to start the while loop
     int retryCount = 0;
-
-    if (currentStep ==0){
+    ESP_LOGW("CO2 Task", "LAST CO2 Reading was: %.2f ppm", averageCO2);
+    if (currentStep == 0){
         xSemaphoreTake(mtx_dataReady_K33, portMAX_DELAY);
         startI2C();
-        
         CO2_Sensor.disableABC_Temporary();
         stopI2C();
         ESP_LOGI("CO2 Task", "Disabling K33 ABC (Temporary)");
         
         currentStep = 1;
-    }else if (currentStep==1){     
+    }
+    else if (currentStep == 1){     
         ESP_LOGI("CO2 Task", "Sampling CO2 Value now.");
         cereal.flush();
 
@@ -247,39 +249,145 @@ void SampleK33_CB(){
             stopI2C();
 
             if (readError == K33_NO_ERROR) {
-                ESP_LOGI("CO2 Task", "K33 CO2 Read @ %d ppm [ No Error ]", CO2_Raw_Val * 10);
-            }else if (readError == K33_VALUE_RANGE_WARNING) {
-                ESP_LOGI("CO2 Task", "K33 CO2 Read @ %d ppm [ Value Range Warning ]", CO2_Raw_Val * 10);
-            }else { 
-                ESP_LOGI("CO2 Task", "K33 CO2 Read @ %d ppm [An Error!]", CO2_Raw_Val * 10);
+                ESP_LOGI("CO2 Task", "K33 CO2 Read @ %.2f ppm [No Error]", (float)(CO2_Raw_Val * 10));
+            }
+            else if (readError == K33_VALUE_RANGE_WARNING) {
+                ESP_LOGI("CO2 Task", "K33 CO2 Read @ %.2f ppm [Value Range Warning]", (float)(CO2_Raw_Val * 10));
+            }
+            else { 
+                ESP_LOGI("CO2 Task", "K33 CO2 Read @ %.2f ppm [Error encountered]", (float)(CO2_Raw_Val * 10));
                 retryCount++;
                 updateRTC_K33ErrorCounts(readError);
                 vTaskDelay(pdTICKS_TO_MS(10));
             }
 
-            // Exit the loop if no error or warning
+            // Exit loop if we obtain a valid reading
             if (readError == K33_NO_ERROR || readError == K33_VALUE_RANGE_WARNING) {
                 break;
             }
         }
 
         if (retryCount >= 5 && readError != K33_NO_ERROR) {
-            ESP_LOGE("CO2 Task", "K33 retry count exceeded, failed to sample CO2. [Guard value of 32768 sent!]");
-            averageCO2 = 32768; // Guard value indicating failure
-        }else {
-            ESP_LOGI("CO2 Task", "CO2 Reports %d ppm", CO2_Raw_Val * 10);
-            averageCO2 = CO2_Raw_Val * 10;
+            ESP_LOGE("CO2 Task", "K33 retry count exceeded; failed to sample CO2. [Guard value of 32768.0 sent!]");
+            averageCO2 = 32768.0; // Guard value indicating failure
+        }
+        else {
+            float currentReading = (float)(CO2_Raw_Val * 10);
+            ESP_LOGI("CO2 Task", "Initial CO2 reading: %.2f ppm", currentReading);
+
+            // Outlier check: only if we have a previous valid reading.
+            if (averageCO2 != 0.0) {
+                // Example threshold: if new reading is less than half or greater than 1.3 times the previous value.
+                if (currentReading < (averageCO2 / 2.0) || currentReading > (averageCO2 * 1.3)) {
+                    ESP_LOGW("CO2 Task", "Outlier detected: current reading %.2f ppm vs previous average %.2f ppm", currentReading, averageCO2);
+                    ESP_LOGI("CO2 Task", "Attempting recheck...");
+                    uint16_t recheckCO2 = 0;
+                    startI2C();
+                    K33SensorError_t recheckError = CO2_Sensor.readCO2Data(recheckCO2);
+                    stopI2C();
+                    if (recheckError == K33_NO_ERROR || recheckError == K33_VALUE_RANGE_WARNING) {
+                        float recheckReading = (float)(recheckCO2 * 10);
+                        ESP_LOGI("CO2 Task", "Recheck reading: %.2f ppm", recheckReading);
+                        // Choose the reading closer to the previous average.
+                        if (fabs(recheckReading - averageCO2) < fabs(currentReading - averageCO2)) {
+                            currentReading = recheckReading;
+                            ESP_LOGI("CO2 Task", "Recheck reading accepted: %.2f ppm", currentReading);
+                        } else {
+                            ESP_LOGI("CO2 Task", "Retaining original reading: %.2f ppm", currentReading);
+                        }
+                    }
+                    else {
+                        ESP_LOGW("CO2 Task", "Recheck failed (error %u). Retaining original reading: %.2f ppm", recheckError, currentReading);
+                    }
+                }
+                else {
+                    ESP_LOGI("CO2 Task", "No outlier detected. Previous average: %.2f ppm, current reading: %.2f ppm", averageCO2, currentReading);
+                }
+            }
+            else {
+                ESP_LOGI("CO2 Task", "No previous reading available for outlier check.");
+            }
+            ESP_LOGI("CO2 Task", "Final CO2 Report: %.2f ppm", currentReading);
+            averageCO2 = currentReading;
         }
         CO2_Sensor.powerOff();
         xSemaphoreGive(mtx_dataReady_K33);
-        //addDeferredTask(LoraTXTask_CB, pdMS_TO_TICKS(10)*1000, 1);
-        //uint32_t bootCount = 0;
-        //rtcSysStat.getDeepWakes(bootCount);
-        //if (bootCount % 5 == 0)
-        //vTaskResume(taskHandle_Tx);
-        //addRTOSTask(taskHandle_Tx, 15 * 1000, 1, "LoRa");
+        // Additional scheduling/RTOS logic can be inserted here if needed.
     }
 }
+
+
+
+
+// void SampleK33_CB(){
+    
+//     static uint32_t currentStep = 0;
+//     int sampleCount = 0;
+
+//     //startCO2Sensor();
+//     uint32_t CO2_Raw_Accumulator = 0;
+//     K33SensorError_t readError;
+//     uint32_t co2SampleAttempts = 0;
+    
+//     uint16_t CO2_Raw_Val = 0;
+//     readError = K33_TIMEOUT_ERROR; //Dummy error type to start the while loop
+//     int retryCount = 0;
+
+//     if (currentStep ==0){
+//         xSemaphoreTake(mtx_dataReady_K33, portMAX_DELAY);
+//         startI2C();
+        
+//         CO2_Sensor.disableABC_Temporary();
+//         stopI2C();
+//         ESP_LOGI("CO2 Task", "Disabling K33 ABC (Temporary)");
+        
+//         currentStep = 1;
+//     }else if (currentStep==1){     
+//         ESP_LOGI("CO2 Task", "Sampling CO2 Value now.");
+//         cereal.flush();
+
+//         startI2C();
+//         readError = CO2_Sensor.readCO2Data(CO2_Raw_Val);
+//         stopI2C();
+//         while((readError != K33_NO_ERROR && readError != K33_VALUE_RANGE_WARNING) && retryCount < 5) {
+//             startI2C();
+//             readError = CO2_Sensor.readCO2Data(CO2_Raw_Val);
+//             stopI2C();
+
+//             if (readError == K33_NO_ERROR) {
+//                 ESP_LOGI("CO2 Task", "K33 CO2 Read @ %d ppm [ No Error ]", CO2_Raw_Val * 10);
+//             }else if (readError == K33_VALUE_RANGE_WARNING) {
+//                 ESP_LOGI("CO2 Task", "K33 CO2 Read @ %d ppm [ Value Range Warning ]", CO2_Raw_Val * 10);
+//             }else { 
+//                 ESP_LOGI("CO2 Task", "K33 CO2 Read @ %d ppm [An Error!]", CO2_Raw_Val * 10);
+//                 retryCount++;
+//                 updateRTC_K33ErrorCounts(readError);
+//                 vTaskDelay(pdTICKS_TO_MS(10));
+//             }
+
+//             // Exit the loop if no error or warning
+//             if (readError == K33_NO_ERROR || readError == K33_VALUE_RANGE_WARNING) {
+//                 break;
+//             }
+//         }
+
+//         if (retryCount >= 5 && readError != K33_NO_ERROR) {
+//             ESP_LOGE("CO2 Task", "K33 retry count exceeded, failed to sample CO2. [Guard value of 32768 sent!]");
+//             averageCO2 = 32768; // Guard value indicating failure
+//         }else {
+//             ESP_LOGI("CO2 Task", "CO2 Reports %d ppm", CO2_Raw_Val * 10);
+//             averageCO2 = CO2_Raw_Val * 10;
+//         }
+//         CO2_Sensor.powerOff();
+//         xSemaphoreGive(mtx_dataReady_K33);
+//         //addDeferredTask(LoraTXTask_CB, pdMS_TO_TICKS(10)*1000, 1);
+//         //uint32_t bootCount = 0;
+//         //rtcSysStat.getDeepWakes(bootCount);
+//         //if (bootCount % 5 == 0)
+//         //vTaskResume(taskHandle_Tx);
+//         //addRTOSTask(taskHandle_Tx, 15 * 1000, 1, "LoRa");
+//     }
+// }
 
 
 // void SampleSHT40_Task(void *param) {
@@ -334,7 +442,8 @@ void SampleK33_CB(){
 //         vTaskSuspend(NULL);
 //     }
 // }
-
+//
+//--added resample of temp/humid in event we get a zero. also added sudden drop detection to run heater
 void SampleSHT40_Task(void *param) {
 
     static uint32_t sampleCount = 0;
@@ -346,8 +455,8 @@ void SampleSHT40_Task(void *param) {
     xSemaphoreTake(mtx_dataReady_SHT40, portMAX_DELAY);
     //vTaskSuspend(NULL);
     while (1) {
-        const uint64_t SHT40_MAXHEAT_COOLDOWN = 20 * 1000 * 1000; //20 Seconds
-        const uint64_t SHT40_LOWHEAT_COOLDOWN = 7 * 1000 * 1000; //7 Seconds
+        const uint64_t SHT40_MAXHEAT_COOLDOWN = 20 * 1000 * 1000; // 20 Seconds
+        const uint64_t SHT40_LOWHEAT_COOLDOWN = 7 * 1000 * 1000;   // 7 Seconds
         float tempVal;
         float humidVal;
         uint16_t anyError = 0;
@@ -358,51 +467,48 @@ void SampleSHT40_Task(void *param) {
 
         if (currentState == 0) {
             uint32_t bootCount = 0;
-            const uint8_t maxRetries = 5;
-            uint8_t attempt = 0;
-            // Try to get a valid reading (non-zero) for both temperature and humidity
-            do {
-                anyError = SHT40_Sensor.measureHighPrecision(originalAmbientTemp, originalHumidity);
-                if (anyError != 0) {
-                    ESP_LOGE("SHT40 Task", "Measurement failed with error code: %u", anyError);
-                    break;
-                }
-                if (originalAmbientTemp != 0 && originalHumidity != 0) {
-                    break;
-                }
-                ESP_LOGW("SHT40 Task", "Zero reading encountered, resampling (attempt %d)", attempt + 1);
-                attempt++;
-                vTaskDelay(pdMS_TO_TICKS(100));  // Brief delay before retrying
-            } while (attempt < maxRetries);
-        
+            anyError = SHT40_Sensor.measureHighPrecision(originalAmbientTemp, originalHumidity);
             rtcSysStat.getDeepWakes(bootCount);
 
             if (bootCount % 10 == 0) {
-                ESP_LOGI("SHT40 Task", "Intensive Humidity De-Creep Heating Started  (Ambient temperature is: %.2f C)", originalAmbientTemp);            
+                ESP_LOGI("SHT40 Task", "Intensive Humidity De-Creep Heating Started (Ambient temperature is: %.2f C)", originalAmbientTemp);            
                 anyError = SHT40_Sensor.activateHighestHeaterPowerLong(tempVal, humidVal);
-                //addRTOSTask(taskHandle_SHT40, SHT40_MAXHEAT_COOLDOWN, 1, "SHT40");
-                //SHT40_HEAT_COOL_DONE = esp_timer_get_time() + SHT40_MAXHEAT_COOLDOWN;
             } else {
-                ESP_LOGI("SHT40 Task", "Prophylactic De-Creep Humidity Heating, (Ambient temperature is: %.2f C)", originalAmbientTemp);            
+                ESP_LOGI("SHT40 Task", "Prophylactic De-Creep Humidity Heating (Ambient temperature is: %.2f C)", originalAmbientTemp);            
                 anyError = SHT40_Sensor.activateMediumHeaterPowerShort(tempVal, humidVal);
-                //addRTOSTask(taskHandle_SHT40, SHT40_LOWHEAT_COOLDOWN, 1, "SHT40");
-                //SHT40_HEAT_COOL_DONE = esp_timer_get_time() + SHT40_LOWHEAT_COOLDOWN;
             }
             stopI2C();
+
+            // --- Added Logging and Extra Heater Activation Section ---
+            // Save the previous global humidity value for comparison.
+            float previousHumidity = averageHumidity;
+            // Update global averages with the new measurements.
             averageTemperature = originalAmbientTemp;
             averageHumidity = originalHumidity;
-            ESP_LOGI("SHT40 Task", "Sampling completed. Temp=%.2f, Humidity=%.2f", originalAmbientTemp, originalHumidity);
+            ESP_LOGI("SHT40 Task", "Sampling completed. Temp = %.2f, Humidity = %.2f", originalAmbientTemp, originalHumidity);
 
-            // Indicate data is ready (if needed)
+            // Check for a sudden drop in humidity.
+            if (previousHumidity != 0 && (previousHumidity - originalHumidity) >= 30) {
+                ESP_LOGW("SHT40 Task", "Sudden humidity drop detected: previous = %.2f, current = %.2f. Running highest heater twice.", previousHumidity, originalHumidity);
+                startI2C();
+                anyError = SHT40_Sensor.activateHighestHeaterPowerLong(tempVal, humidVal);
+                vTaskDelay(pdMS_TO_TICKS(100));  // Brief delay between activations
+                anyError = SHT40_Sensor.activateHighestHeaterPowerLong(tempVal, humidVal);
+                stopI2C();
+            } else {
+                ESP_LOGI("SHT40 Task", "No sudden humidity drop detected (previous = %.2f, current = %.2f). No additional heater activation required.", previousHumidity, originalHumidity);
+            }
+            // --- End of Added Section ---
+
+            // Indicate data is ready
             xSemaphoreGive(mtx_dataReady_SHT40);
             currentState = 1;
-
         }
         // Suspend the task until explicitly resumed
-        //ESP_LOGI("SHT40 Task", "currentState = %d", currentState);
         vTaskSuspend(NULL);
     }
 }
+
 
 
 //FreeRTOS timer that reboots the system after 10 minutes when USB still connected.
@@ -436,24 +542,170 @@ void setupFakePMU_Reboot() {
 }
 
 
-void sleepDeep10(){
+// void sleepDeep10(){
     
-    //To avoid sample time drift, offset the sleep time by the duration of this activation cycle
+//     //To avoid sample time drift, offset the sleep time by the duration of this activation cycle
+//     int64_t totalActiveTime = esp_timer_get_time() - LAST_BOOT_RTC_TIME;
+    
+//     updateLastBootInfo();
+//     //if (!USB_CDC_Connected()){        
+//         ESP_LOGI("FAKEPMU", "Deep sleep ~10M");
+//         if (totalActiveTime>=0 && (SLEEP_TIME_NORMAL * 60 * 1000 * 1000)>totalActiveTime){
+//             esp_sleep_enable_timer_wakeup(SLEEP_TIME_NORMAL * 60 *1000 * 1000 - totalActiveTime);
+//         }else{
+//             esp_sleep_enable_timer_wakeup(SLEEP_TIME_NORMAL * 60 *1000 * 1000);
+//         }
+//         esp_deep_sleep_start();
+//     // }else{
+//     //     setupFakePMU_Reboot();
+//     // }
+// }
+
+Preferences nvPrefs;
+
+// Function to save variables to NVS before sleep
+void saveVariablesToNVS() {
+    // Open preferences in read/write mode
+    nvPrefs.begin("co2sensor", false);
+    
+    // Save our sensor values
+    int co2result = nvPrefs.putFloat("co2", averageCO2);
+    int tempResults = nvPrefs.putFloat("temp", averageTemperature);
+    int humidResults = nvPrefs.putFloat("humid", averageHumidity);
+    
+    ESP_LOGI("NVS_SAVE RESULTS", "results CO2=%d, Temp=%d, Humid=%d", 
+        co2result, tempResults, humidResults);
+    // Save USB connection state
+    nvPrefs.putBool("usb", USB_CDC_Connected());
+    
+    // Close the preferences
+    nvPrefs.end();
+    
+    ESP_LOGI("NVS_SAVE", "Saved to NVS: CO2=%.2f, Temp=%.2f, Humid=%.2f", 
+             averageCO2, averageTemperature, averageHumidity);
+}
+
+// Function to load variables from NVS after wake
+void loadVariablesFromNVS() {
+    ESP_LOGI("NVS_DEBUG", "Before loading: CO2=%.2f, Temp=%.2f, Humid=%.2f", 
+             averageCO2, averageTemperature, averageHumidity);
+    
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    ESP_LOGI("NVS_DEBUG", "Wake cause: %d", wakeup_cause);
+    
+    // Only load values if waking from deep sleep
+    if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
+        // Open preferences in read-only mode
+        if (!nvPrefs.begin("co2sensor", true)) {
+            ESP_LOGE("NVS_DEBUG", "Failed to open NVS namespace");
+            return;
+        }
+        
+        // Check if the keys exist
+        bool co2Exists = nvPrefs.isKey("co2");
+        bool tempExists = nvPrefs.isKey("temp");
+        bool humidExists = nvPrefs.isKey("humid");
+        
+        ESP_LOGI("NVS_DEBUG", "NVS keys exist? CO2: %d, Temp: %d, Humid: %d", 
+                co2Exists, tempExists, humidExists);
+        
+        // Load sensor values with defaults if not found
+        float oldCO2 = averageCO2;
+        float oldTemp = averageTemperature;
+        float oldHumid = averageHumidity;
+        
+        averageCO2 = nvPrefs.getFloat("co2", 0.0f);
+        averageTemperature = nvPrefs.getFloat("temp", 0.0f);
+        averageHumidity = nvPrefs.getFloat("humid", 0.0f);
+        
+        // Close the preferences
+        nvPrefs.end();
+        
+        ESP_LOGI("NVS_DEBUG", "Values changed: CO2: %.2f → %.2f, Temp: %.2f → %.2f, Humid: %.2f → %.2f", 
+                oldCO2, averageCO2, oldTemp, averageTemperature, oldHumid, averageHumidity);
+    } else {
+        ESP_LOGI("NVS_DEBUG", "Not waking from deep sleep (cause: %d), using default values", wakeup_cause);
+    }
+}
+
+
+void sleepDeep10() {
+    // Save variables to NVS
+    saveVariablesToNVS();
+    
+    // To avoid sample time drift, offset the sleep time by the duration of this activation cycle
     int64_t totalActiveTime = esp_timer_get_time() - LAST_BOOT_RTC_TIME;
     
     updateLastBootInfo();
-    if (!USB_CDC_Connected()){        
-        ESP_LOGI("FAKEPMU", "Deep sleep ~10M");
-        if (totalActiveTime>=0 && (SLEEP_TIME_NORMAL * 60 * 1000 * 1000)>totalActiveTime){
-            esp_sleep_enable_timer_wakeup(SLEEP_TIME_NORMAL * 60 *1000 * 1000 - totalActiveTime);
-        }else{
-            esp_sleep_enable_timer_wakeup(SLEEP_TIME_NORMAL * 60 *1000 * 1000);
-        }
-        esp_deep_sleep_start();
-    }else{
-        setupFakePMU_Reboot();
+    
+    if (USB_CDC_Connected()) {
+        ESP_LOGI("SLEEP", "USB connected before sleep - will restore on wake");
+    }
+    
+    ESP_LOGI("SLEEP", "Entering deep sleep ~10M");
+    
+    if (totalActiveTime >= 0 && (SLEEP_TIME_NORMAL * 60 * 1000 * 1000) > totalActiveTime) {
+        esp_sleep_enable_timer_wakeup(SLEEP_TIME_NORMAL * 60 * 1000 * 1000 - totalActiveTime);
+    } else {
+        esp_sleep_enable_timer_wakeup(SLEEP_TIME_NORMAL * 60 * 1000 * 1000);
+    }
+    
+    // Properly flush all output before sleep
+    Serial.flush();
+    cereal.flush();
+    
+    // Enter deep sleep
+    esp_deep_sleep_start();
+}
+
+void reconnectUSB() {
+    ESP_LOGI("USB", "Reconnecting USB after deep sleep");
+    
+    // Re-initialize USB
+    Serial.end();
+    delay(100);
+    Serial.begin(115200);
+    
+    // Give USB time to reconnect
+    delay(300);
+    
+    if (USB_CDC_Connected()) {
+        ESP_LOGI("USB", "USB reconnected successfully");
+    } else {
+        ESP_LOGW("USB", "USB reconnection attempt failed");
     }
 }
+
+
+// void restoreUSBConnection() {
+//     if (resumingFromDeepSleep && USB_WasConnected) {
+//         ESP_LOGI("USB", "Restoring USB connection after deep sleep");
+        
+//         // Re-initialize USB CDC
+//         Serial.end();
+//         delay(100);
+//         Serial.begin(115200);
+        
+//         // Give USB time to reconnect to host
+//         int timeout = 1000; // 1 second timeout
+//         int elapsed = 0;
+//         int checkInterval = 50; // Check every 50ms
+        
+//         while (!USB_CDC_Connected() && elapsed < timeout) {
+//             delay(checkInterval);
+//             elapsed += checkInterval;
+//         }
+        
+//         if (USB_CDC_Connected()) {
+//             ESP_LOGI("USB", "USB connection restored successfully");
+//         } else {
+//             ESP_LOGW("USB", "Failed to restore USB connection within timeout");
+//         }
+//     }
+    
+//     // Reset the flag for next sleep cycle
+//     resumingFromDeepSleep = false;
+// }
 
 TickType_t xSensorStartTime = 0;
 
@@ -495,15 +747,22 @@ void setupdeferredRTCTasks(){
 
 void setup() {
     //Record bootup time per RTC, (microsecond resolution)
+    //delay(5000);
     LAST_BOOT_RTC_TIME = esp_timer_get_time();
     //esp_disable_brownout_detection();
-    
+    //Load variables from NVS
+    loadVariablesFromNVS();
     EarlyPinInit();
     bool GPIO8_LOW_AT_BOOT = !digitalRead(GPIO8_TP);
     
     bool KEY0_PRESSED_AT_BOOT = !digitalRead(KEY0_IN);
     
     serialInitPhase1(); 
+    esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    ESP_LOGI("WAKEUP", "Wakeup cause: %d", wakeup_cause);
+
+    ESP_LOGI("SENSOR_AVERAGES", "Startup: averageCO2 = %.2f ppm, averageTemperature = %.2f C, averageHumidity = %.2f %%", 
+        averageCO2, averageTemperature, averageHumidity);
 
     // Verify RTC System Operation Stat data, re-init if neccessary
     rtcSysStat.VerifySystemStatusCRC();
